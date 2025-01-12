@@ -1,73 +1,49 @@
 import os
 from deepface import DeepFace
-from mtcnn import MTCNN
 import cv2
 import numpy as np
 import pickle
+from tqdm import tqdm
 
-# Directory where the dataset is stored
 dataset_dir = "dataset/"
 
-# Ensure that the dataset is present
 if not os.path.exists(dataset_dir):
-    print(f"Error: Dataset directory '{dataset_dir}' does not exist.")
-    exit()
+    raise FileNotFoundError(f"Error: Dataset directory '{dataset_dir}' does not exist.")
 
-# List all the folders (each person) in the dataset directory
-people = os.listdir(dataset_dir)
+people = [p for p in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, p))]
 
-# Check if there are any subdirectories (people)
 if not people:
-    print("Error: No subdirectories found in the dataset. Make sure you have collected images.")
-    exit()
+    raise ValueError("Error: No subdirectories found in the dataset. Make sure you have collected images.")
 
-# Set the backend for DeepFace (you can change to VGG-Face, FaceNet, etc.)
-backend = "Facenet"  # You can change this to other models like VGG-Face, OpenFace, etc.
-
-# Initialize MTCNN detector for face detection
-detector = MTCNN()
-
-# Dictionary to store embeddings for each person
+backend = "Facenet"
 embeddings_dict = {}
 
-# Loop through each person's folder in the dataset directory
-for person in people:
+for person in tqdm(people, desc="Processing People"):
     person_dir = os.path.join(dataset_dir, person)
-    if not os.path.isdir(person_dir):
-        continue
-
-    # List to store face embeddings for the current person
     person_embeddings = []
-
-    # Loop through each image in the person's folder
-    for img_file in os.listdir(person_dir):
+    
+    for img_file in tqdm(os.listdir(person_dir), desc=f"Processing Images for {person}", leave=False):
         img_path = os.path.join(person_dir, img_file)
         
-        # Read the image
         img = cv2.imread(img_path)
+        if img is None:
+            print(f"Warning: Failed to read image {img_path}. Skipping.")
+            continue
         
-        # Detect faces using MTCNN
-        faces = detector.detect_faces(img)
+        try:
+            embeddings = DeepFace.represent(img, model_name=backend, enforce_detection=False)
+            for embedding in embeddings:
+                person_embeddings.append(embedding["embedding"])
         
-        # If faces are detected, extract embeddings for each face
-        if faces:
-            for face in faces:
-                # Get bounding box coordinates
-                x, y, w, h = face['box']
-                
-                # Crop the face from the image
-                face_image = img[y:y+h, x:x+w]
-                
-                # Use DeepFace to extract embeddings for the face
-                embedding = DeepFace.represent(face_image, model_name=backend, enforce_detection=False)
-                
-                # Append the embedding to the person's list of embeddings
-                person_embeddings.append(embedding[0]['embedding'])
+        except Exception as e:
+            print(f"Error processing {img_path}: {str(e)}. Skipping.")
+    
+    if person_embeddings:
+        aggregated_embedding = np.mean(person_embeddings, axis=0).tolist()
+        embeddings_dict[person] = aggregated_embedding
+    else:
+        print(f"Warning: No embeddings found for {person}. Skipping.")
 
-    # Store the person's embeddings in the dictionary
-    embeddings_dict[person] = person_embeddings
-
-# Save the embeddings to a pickle file for future use
 with open("face_embeddings.pkl", "wb") as f:
     pickle.dump(embeddings_dict, f)
 
