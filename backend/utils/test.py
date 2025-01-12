@@ -9,7 +9,7 @@ if not os.path.exists(dataset_dir):
 
 face_cascade = cv2.CascadeClassifier(os.path.join(os.path.dirname(cv2.__file__), 'data', 'haarcascade_frontalface_default.xml'))
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0) 
 
 if not cap.isOpened():
     print("Error: Could not open webcam.")
