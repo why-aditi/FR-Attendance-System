@@ -2,7 +2,7 @@ import cv2
 import os
 
 # Load the face detection classifier
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+face_cascade = cv2.CascadeClassifier(os.path.join(os.path.dirname(cv2.__file__), 'data', 'haarcascade_frontalface_default.xml'))
 
 # Directory to store collected images
 dataset_dir = "dataset/"
@@ -63,13 +63,16 @@ while True:
             # Extract the face region with padding
             face = frame[y:y + h, x:x + w]
 
+            # Resize the face to 224x224x3 (standard input size for most models)
+            face_resized = cv2.resize(face, (224, 224))
+
             # Save the image with the current position label
             img_count += 1
             img_path = os.path.join(person_dir, f"{name}_{positions[current_position]}_{img_count}.jpg")
-            cv2.imwrite(img_path, face)
+            cv2.imwrite(img_path, face_resized)
 
             # Show the captured face in a separate window
-            cv2.imshow('Captured Face', face)
+            cv2.imshow('Captured Face', face_resized)
 
     # Show the video feed
     cv2.imshow('Video', frame)
