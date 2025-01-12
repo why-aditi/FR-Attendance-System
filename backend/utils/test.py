@@ -31,6 +31,9 @@ def recognize_face(frame):
 
     if len(faces) > 0:
         for (x, y, w, h) in faces:
+            # Draw a bounding box around the face
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
             # Crop the face from the frame
             face = frame[y:y + h, x:x + w]
 
@@ -41,20 +44,22 @@ def recognize_face(frame):
             try:
                 # The model_name should match the backend used during training
                 result = DeepFace.find(face_resized, db_path=dataset_dir, model_name="Facenet", enforce_detection=False)
-                print("Recognition Result:", result)
-                
-                # Display name on the frame
-                label = str(result[0]["identity"])
-                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+                if result:
+                    # Extract only the name from the result's identity column
+                    full_identity_path = result[0].iloc[0]["identity"]
+                    name = os.path.basename(os.path.dirname(full_identity_path))
+
+                    # Display the name above the bounding box
+                    cv2.putText(frame, name, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                else:
+                    # If no match is found, display "Unknown"
+                    cv2.putText(frame, "Unknown", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
             except Exception as e:
                 print(f"Error during recognition: {e}")
-                label = "Unknown"
-                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.putText(frame, "Error", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-            # Show the recognized face in a separate window
-            cv2.imshow("Recognized Face", face_resized)
-    
     return frame
 
 # Main loop for testing
