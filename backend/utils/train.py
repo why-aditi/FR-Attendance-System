@@ -5,7 +5,8 @@ import numpy as np
 import pickle
 from tqdm import tqdm
 
-dataset_dir = "dataset/"
+# Update the dataset directory path to match your project structure
+dataset_dir = "./datasets/"
 
 if not os.path.exists(dataset_dir):
     raise FileNotFoundError(f"Error: Dataset directory '{dataset_dir}' does not exist.")

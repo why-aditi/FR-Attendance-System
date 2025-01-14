@@ -13,7 +13,7 @@ cap = cv2.VideoCapture(0)
 
 if not cap.isOpened():
     print("Error: Could not open webcam.")
-    exit()
+    exit() 
 
 def recognize_face(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
