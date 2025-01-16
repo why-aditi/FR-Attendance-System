@@ -17,7 +17,7 @@ app.add_middleware(
 )
 
 # Include routers with prefix and tags
-app.include_router(router, prefix="/api/register", tags=["registration"])
+app.include_router(router, prefix="/api", tags=["registration"])
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

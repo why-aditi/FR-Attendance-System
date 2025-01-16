@@ -1,133 +1,99 @@
-# app/routers/registration.py
-from fastapi import APIRouter, File, UploadFile, HTTPException
-import os
+from fastapi import UploadFile, File, HTTPException, APIRouter, Form
 from deepface import DeepFace
-import cv2
 import numpy as np
-import pickle
-from pathlib import Path
-import shutil
-from model.user import RegistrationRequest, RegistrationResponse, ProcessingResponse
+import cv2
+import json
+from config.db import face_collection
+
 router = APIRouter()
 
-# Configuration
-DATASET_DIR = Path("dataset")
-EMBEDDINGS_FILE = "face_embeddings.pkl"
-BACKEND = "Facenet"
-
-# Ensure dataset directory exists
-DATASET_DIR.mkdir(parents=True, exist_ok=True)
-
-@router.post("/init", response_model=RegistrationResponse)
-async def initialize_registration(registration: RegistrationRequest):
-    """Initialize the registration process for a new employee"""
+# Utility functions
+def get_face_embedding(image: np.ndarray) -> np.ndarray:
+    """Extract face embedding using DeepFace."""
     try:
-        # Create employee directory
-        employee_dir = DATASET_DIR / registration.name
-        employee_dir.mkdir(parents=True, exist_ok=True)
-        
-        return RegistrationResponse(
-            status="success",
-            message=f"Registration initialized for {registration.name}"
+        # Generate face embedding
+        embedding = DeepFace.represent(
+            image,
+            model_name="Facenet",
+            enforce_detection=True
         )
+        return np.array(embedding)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/upload", response_model=RegistrationResponse)
-async def upload_face_image(
-    name: str,
-    position: str,
-    index: int,
-    file: UploadFile = File(...)
-):
-    """Upload a single face image during registration"""
-    try:
-        employee_dir = DATASET_DIR / name
-        if not employee_dir.exists():
-            raise HTTPException(status_code=404, detail="Employee registration not initialized")
-        
-        # Save the uploaded image
-        image_path = employee_dir / f"{name}_{position}_{index}.jpg"
-        with image_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        return RegistrationResponse(
-            status="success",
-            message=f"Image uploaded successfully: {image_path.name}"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to extract face embedding: {str(e)}"
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/process", response_model=ProcessingResponse)
-async def process_registration(name: str):
-    """Process all uploaded images and generate embeddings"""
+def process_image(image_data: bytes) -> np.ndarray:
+    """Convert image bytes to a numpy array and validate the image."""
+    nparr = np.frombuffer(image_data, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image data. Unable to decode.")
+    return img
+
+# Route handlers
+@router.post("/register", response_model=dict)
+async def register_employee(name: str = Form(...),
+    employee_id: str = Form(...),
+    images: list[UploadFile] = File(...)):
+    """
+    Register a new employee with multiple face images.
+
+    Args:
+        employee (NewEmployee): Employee details (name and employee_id).
+        images (List[UploadFile]): List of face image files uploaded.
+
+    Returns:
+        dict: Registration status and employee details.
+    """
     try:
-        person_dir = DATASET_DIR / name
-        if not person_dir.exists():
-            raise HTTPException(status_code=404, detail="Employee data not found")
-        
-        person_embeddings = []
-        for img_file in person_dir.iterdir():
-            if img_file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
-                img = cv2.imread(str(img_file))
-                if img is None:
-                    continue
-                
-                try:
-                    embeddings = DeepFace.represent(img, model_name=BACKEND, enforce_detection=False)
-                    for embedding in embeddings:
-                        person_embeddings.append(embedding["embedding"])
-                except Exception as e:
-                    print(f"Error processing {img_file}: {str(e)}")
-        
-        if not person_embeddings:
-            raise HTTPException(status_code=500, detail="No valid embeddings generated")
-        
-        # Calculate and save average embedding
-        aggregated_embedding = np.mean(person_embeddings, axis=0).tolist()
-        
-        # Load existing embeddings or create new dict
-        embeddings_dict = {}
-        if os.path.exists(EMBEDDINGS_FILE):
-            with open(EMBEDDINGS_FILE, "rb") as f:
-                embeddings_dict = pickle.load(f)
-        
-        # Update embeddings
-        embeddings_dict[name] = aggregated_embedding
-        
-        # Save updated embeddings
-        with open(EMBEDDINGS_FILE, "wb") as f:
-            pickle.dump(embeddings_dict, f)
-        
-        return ProcessingResponse(
-            status="success",
-            embedding_path=EMBEDDINGS_FILE
+        # Check if employee already exists in the database
+        existing = face_collection.get(where={"employee_id": employee_id})
+        if existing["ids"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Employee with ID '{employee_id}' already exists."
+            )
+
+        # Initialize list for face embeddings
+        embeddings = []
+        for image in images:
+            # Read and process each image
+            contents = await image.read()
+            img = process_image(contents)
+
+            # Extract face embedding
+            embedding = get_face_embedding(img)
+            embeddings.append(embedding.tolist())
+
+        # Store embeddings and metadata in the database
+        face_collection.add(
+            embeddings=embeddings,
+            documents=[
+                json.dumps({
+                    "name": name,
+                    "employee_id": employee_id
+                })
+            ] * len(embeddings),
+            ids=[f"{employee_id}_{i}" for i in range(len(embeddings))]
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/status/{name}")
-async def check_registration_status(name: str):
-    """Check the registration status for an employee"""
-    try:
-        employee_dir = DATASET_DIR / name
-        if not employee_dir.exists():
-            return {"status": "not_found"}
-        
-        # Count images
-        image_count = len(list(employee_dir.glob("*.jpg")))
-        
-        # Check if embeddings exist
-        has_embeddings = False
-        if os.path.exists(EMBEDDINGS_FILE):
-            with open(EMBEDDINGS_FILE, "rb") as f:
-                embeddings_dict = pickle.load(f)
-                has_embeddings = name in embeddings_dict
-        
+        # Return success response
         return {
-            "status": "complete" if has_embeddings else "in_progress",
-            "images_collected": image_count,
-            "has_embeddings": has_embeddings
+            "message": "Employee registered successfully.",
+            "employee": {
+                "name": name,
+                "employee_id": employee_id,
+                "faces_registered": len(embeddings)
+            }
         }
+    except HTTPException as he:
+        # Re-raise HTTP exceptions for appropriate response codes
+        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Handle unexpected exceptions
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
