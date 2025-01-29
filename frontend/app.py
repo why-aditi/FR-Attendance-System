@@ -4,6 +4,7 @@ import cv2
 import os
 from pathlib import Path
 from deepface import DeepFace
+import requests
 
 def nav_to(url):
     js = f"""
@@ -13,6 +14,126 @@ def nav_to(url):
     """
     html(js, height=0)
 
+def register_api_call(name, employee_id, image_paths):
+    """
+    Make API call to register a new employee using multipart form data with improved error handling
+    and image validation using correct DeepFace API
+    """
+    API_ENDPOINT = "http://localhost:8000/api/register"
+    
+    try:
+        # Validate inputs
+        if not name or not employee_id:
+            return {
+                "success": False,
+                "message": "Name and employee ID are required",
+                "status_code": 400
+            }
+            
+        if not image_paths:
+            return {
+                "success": False,
+                "message": "No image paths provided",
+                "status_code": 400
+            }
+        
+        # Prepare files list for multipart upload
+        files = []
+        valid_images = []
+        
+        for i, path in enumerate(image_paths):
+            try:
+                # Read and verify image
+                img = cv2.imread(str(path))
+                if img is None:
+                    print(f"Warning: Could not read image {path}")
+                    continue
+                    
+                # Verify image dimensions
+                height, width = img.shape[:2]
+                if height < 64 or width < 64:
+                    print(f"Warning: Image {path} is too small ({width}x{height})")
+                    continue
+                
+                # Verify face detection using DeepFace.represent
+                try:
+                    # Convert BGR to RGB for DeepFace
+                    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    # Use represent function with enforce_detection=True to ensure face is present
+                    face_result = DeepFace.represent(
+                        rgb_img, 
+                        model_name="Facenet",
+                        enforce_detection=True,
+                        detector_backend="opencv"
+                    )
+                    
+                    if face_result and isinstance(face_result, list) and len(face_result) > 0:
+                        # If face detection succeeds, add to valid images
+                        # Encode as JPEG with quality setting
+                        _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        files.append(
+                            ("images", (f"face_{i}.jpg", buffer.tobytes(), "image/jpeg"))
+                        )
+                        valid_images.append(path)
+                        print(f"Successfully processed image: {path}")
+                    else:
+                        print(f"Warning: No face detected in {path}")
+                        continue
+                    
+                except Exception as e:
+                    print(f"Warning: Face detection failed for {path}: {str(e)}")
+                    continue
+                    
+            except Exception as e:
+                print(f"Error processing file {path}: {e}")
+                continue
+        
+        if not files:
+            return {
+                "success": False,
+                "message": "No valid face images found in the provided images",
+                "status_code": 400
+            }
+        
+        print(f"Sending {len(files)} valid images to API")
+        
+        # Make the API call with multipart form data
+        response = requests.post(
+            API_ENDPOINT,
+            files=files,
+            data={
+                "name": name,
+                "employee_id": employee_id
+            },
+            timeout=30  # Add timeout
+        )
+        
+        print(f"API Response: {response.status_code} - {response.text}")
+        
+        return {
+            "success": response.status_code == 200,
+            "message": response.text,
+            "status_code": response.status_code,
+            "valid_images": valid_images,
+            "total_processed": len(valid_images)
+        }
+        
+    except requests.exceptions.RequestException as e:
+        print(f"API Request Error: {str(e)}")
+        return {
+            "success": False,
+            "message": f"API request failed: {str(e)}",
+            "status_code": None
+        }
+    finally:
+        # Clean up
+        for file_tuple in files:
+            try:
+                if hasattr(file_tuple[1][1], 'close'):
+                    file_tuple[1][1].close()
+            except:
+                pass
+            
 def main():
     st.set_page_config(page_title="Employee Clock-In System", page_icon="📅")
     
@@ -113,7 +234,7 @@ def register_page1():
 #                 st.error("Please fill out all the fields.")
 
 def register_page2():
-    BASE_DATASET_DIR = Path("datasets")  # You can customize this base directory
+    BASE_DATASET_DIR = Path("datasets")
     if not hasattr(st.session_state, 'name'):
         st.error("Please complete step 1 first.")
         nav_to("?page=register1")
@@ -127,102 +248,136 @@ def register_page2():
     if 'captured_images' not in st.session_state:
         st.session_state.captured_images = 0
         st.session_state.current_position = 0
+        st.session_state.last_capture_time = 0
 
     positions = ['front', 'left', 'right']
 
     # Create dataset directory for the user
     user_dir = BASE_DATASET_DIR / st.session_state.name
-    try:
-        user_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        st.error(f"Error creating dataset directory: {e}")
-        return
+    user_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize face cascade
-    face_cascade_path = os.path.join(
-        os.path.dirname(cv2.__file__),
-        'data',
-        'haarcascade_frontalface_default.xml'
-    )
-    face_cascade = cv2.CascadeClassifier(face_cascade_path)
+    # Initialize face cascade with optimized parameters
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
     # Camera capture section
     instruction = st.empty()
     FRAME_WINDOW = st.image([])
-
-    wait_message = st.markdown(
-        "<div style='text-align: center; font-size: 16px; color: gray;'>"
-        "Please wait until the webcam starts processing...</div>",
-        unsafe_allow_html=True,
-    )
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
     camera = cv2.VideoCapture(0)
-    while st.session_state.captured_images < 50:
-        instruction.markdown(
-            f"<div style='text-align: center; font-size: 20px;'>"
-            f"Please look <span style='font-style: italic;'>"
-            f"{positions[st.session_state.current_position]}</span></div>",
-            unsafe_allow_html=True,
-        )
+    # Set lower resolution for faster processing
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        ret, frame = camera.read()
-        if ret:
-            wait_message.empty()
-            # Convert to RGB for display
-            display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    import time
+    capture_interval = 0.1  # Minimum time between captures in seconds
 
-            # Face detection
+    try:
+        while st.session_state.captured_images < 50:
+            current_time = time.time()
+            instruction.markdown(
+                f"<div style='text-align: center; font-size: 20px;'>"
+                f"Please look <span style='font-style: italic;'>"
+                f"{positions[st.session_state.current_position]}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            ret, frame = camera.read()
+            if not ret:
+                continue
+
+            # Convert to grayscale first for faster processing
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(gray, 1.1, 5)
+            
+            # Optimize face detection parameters
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.2,  # Increased for faster processing
+                minNeighbors=3,   # Reduced for faster detection
+                minSize=(50, 50)  # Minimum face size
+            )
 
+            if len(faces) > 0 and (current_time - st.session_state.last_capture_time) >= capture_interval:
+                x, y, w, h = faces[0]  # Take only the first face detected
+                
+                # Add padding to the face
+                padding = 50  # Reduced padding for faster processing
+                x = max(x - padding, 0)
+                y = max(y - padding, 0)
+                w = min(w + 2 * padding, frame.shape[1] - x)
+                h = min(h + 2 * padding, frame.shape[0] - y)
+
+                # Extract and save face
+                face = frame[y:y + h, x:x + w]
+                face_resized = cv2.resize(face, (160, 160))  # Smaller size for faster processing
+
+                # Save image
+                img_path = user_dir / f"{st.session_state.name}_{positions[st.session_state.current_position]}_{st.session_state.captured_images}.jpg"
+                cv2.imwrite(str(img_path), face_resized)
+                
+                st.session_state.captured_images += 1
+                st.session_state.last_capture_time = current_time
+
+                # Update position counter
+                if st.session_state.captured_images % 17 == 0:
+                    st.session_state.current_position = (st.session_state.current_position + 1) % len(positions)
+
+            # Update UI
+            display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             if len(faces) > 0:
-                for (x, y, w, h) in faces:
-                    # Add padding to the face
-                    padding = 80
-                    x = max(x - padding, 0)
-                    y = max(y - padding, 0)
-                    w = min(w + 2 * padding, frame.shape[1] - x)
-                    h = min(h + 2 * padding, frame.shape[0] - y)
-
-                    # Draw rectangle around face
-                    cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-                    # Extract and save face
-                    face = frame[y:y + h, x:x + w]
-                    face_resized = cv2.resize(face, (224, 224))
-
-                    # Save image
-                    img_path = user_dir / f"{st.session_state.name}_{positions[st.session_state.current_position]}_{st.session_state.captured_images}.jpg"
-                    try:
-                        cv2.imwrite(str(img_path), face_resized)
-                        st.session_state.captured_images += 1
-                    except Exception as e:
-                        st.error(f"Error saving image: {e}")
-                        camera.release()
-                        return
-
-                    # Update position every 17 images
-                    if st.session_state.captured_images % 17 == 0:
-                        st.session_state.current_position = (st.session_state.current_position + 1) % len(positions)
+                x, y, w, h = faces[0]
+                cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
             FRAME_WINDOW.image(display_frame)
+            progress_bar.progress(st.session_state.captured_images / 50)
+            status_text.text(f"Captured {st.session_state.captured_images}/50 images")
 
-            # Check if we're done
             if st.session_state.captured_images >= 50:
                 camera.release()
                 nav_to("?page=registered")
                 st.query_params["page"] = "registered"
                 st.rerun()
 
-    camera.release()
-    st.write('Camera processing complete!')
+    finally:
+        camera.release()    
 
 def registered_page():
+    # Check if we have the required session state
+    if 'name' not in st.session_state or 'employee_id' not in st.session_state:
+        st.error("Session expired or invalid. Please start registration again.")
+        if st.button("Return to Registration"):
+            nav_to("?page=register1")
+            st.query_params["page"] = "register1"
+            st.rerun()
+        return
+    
     st.header("Registration Complete!")
-    st.success(f"Employee {st.session_state.name} registered successfully!")
+    
+    dataset_path = Path("datasets") / st.session_state.name
+    if dataset_path.exists():
+        image_paths = list(dataset_path.glob("*.jpg"))
+        with st.spinner("Syncing with server..."):
+            api_response = register_api_call(
+                st.session_state.name, 
+                st.session_state.employee_id, 
+                image_paths
+            )
+            
+            if api_response["success"]:
+                st.success(f"Employee {st.session_state.name} registered successfully!")
+                st.write(f"Registered {len(api_response.get('valid_images', []))} face images")
+            else:
+                st.error("Server registration failed")
+                st.write(api_response["message"])
+                st.write("Please contact support with the following details:")
+                st.code(api_response)
+    else:
+        st.error(f"No images found for {st.session_state.name}")
     
     if st.button("Return to Home"):
-        for key in ['name', 'email', 'employee_id', 'captured_images', 'current_position']:
+        # Clear session state
+        for key in ['name', 'employee_id', 'captured_images', 'current_position', 'last_capture_time']:
             if key in st.session_state:
                 del st.session_state[key]
         
