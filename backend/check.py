@@ -1,7 +1,7 @@
 import chromadb
 
 # Initialize ChromaDB client
-chroma_client = chromadb.PersistentClient(path="backend/chromadb")
+chroma_client = chromadb.PersistentClient(path="src/chroma")  # Or chromadb.Client() for in-memory storage
 
 # List all collection names
 collections = chroma_client.list_collections()
@@ -10,7 +10,7 @@ for coll in collections:
     print(coll)  # Print the collection name directly
 
 # Load the collection
-collection = chroma_client.get_collection(name="face_embeddings")  # Use your actual collection name
+collection = chroma_client.get_collection(name="face")  # Use your actual collection name
 
 # Retrieve stored embeddings
 stored_data = collection.get()  # Fetch all data

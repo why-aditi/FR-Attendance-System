@@ -13,7 +13,7 @@ class FaceEmbeddingFunction(EmbeddingFunction):
         return [np.random.rand(512).tolist() for _ in docs]  # Example: Random 512-dim embeddings
 
 # Initialize ChromaDB client
-chroma_client = chromadb.PersistentClient()  # Or chromadb.Client() for in-memory storage
+chroma_client = chromadb.PersistentClient(path="backend\src\chroma")  # Or chromadb.Client() for in-memory storage
 
 # Use the custom face embedding function
 face_embedding_fn = FaceEmbeddingFunction()
