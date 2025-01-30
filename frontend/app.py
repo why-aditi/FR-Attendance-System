@@ -16,10 +16,11 @@ def nav_to(url):
 
 def register_api_call(name, employee_id, image_paths):
     """
-    Make API call to register a new employee using multipart form data with improved error handling
-    and image validation using correct DeepFace API
+    Make API call to register a new employee using multipart form data.
+    Considers registration successful if at least 40 valid face images are detected.
     """
     API_ENDPOINT = "http://localhost:8000/api/register"
+    MIN_VALID_FRAMES = 40
     
     try:
         # Validate inputs
@@ -40,6 +41,7 @@ def register_api_call(name, employee_id, image_paths):
         # Prepare files list for multipart upload
         files = []
         valid_images = []
+        invalid_images = []
         
         for i, path in enumerate(image_paths):
             try:
@@ -47,19 +49,19 @@ def register_api_call(name, employee_id, image_paths):
                 img = cv2.imread(str(path))
                 if img is None:
                     print(f"Warning: Could not read image {path}")
+                    invalid_images.append((str(path), "Could not read image"))
                     continue
                     
                 # Verify image dimensions
                 height, width = img.shape[:2]
                 if height < 64 or width < 64:
                     print(f"Warning: Image {path} is too small ({width}x{height})")
+                    invalid_images.append((str(path), "Image too small"))
                     continue
                 
                 # Verify face detection using DeepFace.represent
                 try:
-                    # Convert BGR to RGB for DeepFace
                     rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    # Use represent function with enforce_detection=True to ensure face is present
                     face_result = DeepFace.represent(
                         rgb_img, 
                         model_name="Facenet",
@@ -68,34 +70,41 @@ def register_api_call(name, employee_id, image_paths):
                     )
                     
                     if face_result and isinstance(face_result, list) and len(face_result) > 0:
-                        # If face detection succeeds, add to valid images
-                        # Encode as JPEG with quality setting
                         _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         files.append(
                             ("images", (f"face_{i}.jpg", buffer.tobytes(), "image/jpeg"))
                         )
-                        valid_images.append(path)
+                        valid_images.append(str(path))
                         print(f"Successfully processed image: {path}")
                     else:
                         print(f"Warning: No face detected in {path}")
+                        invalid_images.append((str(path), "No face detected"))
                         continue
                     
                 except Exception as e:
                     print(f"Warning: Face detection failed for {path}: {str(e)}")
+                    invalid_images.append((str(path), f"Face detection failed: {str(e)}"))
                     continue
                     
             except Exception as e:
                 print(f"Error processing file {path}: {e}")
+                invalid_images.append((str(path), f"Processing error: {str(e)}"))
                 continue
         
-        if not files:
+        valid_count = len(valid_images)
+        print(f"Processed {valid_count} valid images out of {len(image_paths)}")
+        
+        if valid_count < MIN_VALID_FRAMES:
             return {
                 "success": False,
-                "message": "No valid face images found in the provided images",
-                "status_code": 400
+                "message": f"Insufficient valid face images. Found {valid_count}, need at least {MIN_VALID_FRAMES}",
+                "status_code": 400,
+                "valid_images": valid_images,
+                "invalid_images": invalid_images,
+                "total_processed": valid_count
             }
         
-        print(f"Sending {len(files)} valid images to API")
+        print(f"Sending {valid_count} valid images to API")
         
         # Make the API call with multipart form data
         response = requests.post(
@@ -105,7 +114,7 @@ def register_api_call(name, employee_id, image_paths):
                 "name": name,
                 "employee_id": employee_id
             },
-            timeout=30  # Add timeout
+            timeout=30
         )
         
         print(f"API Response: {response.status_code} - {response.text}")
@@ -115,7 +124,8 @@ def register_api_call(name, employee_id, image_paths):
             "message": response.text,
             "status_code": response.status_code,
             "valid_images": valid_images,
-            "total_processed": len(valid_images)
+            "invalid_images": invalid_images,
+            "total_processed": valid_count
         }
         
     except requests.exceptions.RequestException as e:
