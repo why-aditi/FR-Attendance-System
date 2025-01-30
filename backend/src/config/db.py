@@ -21,10 +21,15 @@ face_embedding_fn = FaceEmbeddingFunction()
 # Collection name
 collection_name = "face"
 
+# Get the list of collection names
+collection_names = chroma_client.list_collections()
+
 # Check if the collection already exists
-if collection_name in [coll.name for coll in chroma_client.list_collections()]:
+if collection_name in collection_names:
+    # If the collection exists, retrieve it
     face_collection = chroma_client.get_collection(name=collection_name, embedding_function=face_embedding_fn)
 else:
+    # If the collection does not exist, create a new one
     face_collection = chroma_client.create_collection(
         name=collection_name,
         embedding_function=face_embedding_fn  # Now correctly typed for face embeddings
