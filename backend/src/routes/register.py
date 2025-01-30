@@ -9,6 +9,8 @@ from config.db import face_collection
 from typing import List, Optional
 import io
 from PIL import Image
+from bson import Binary
+import pickle
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -168,37 +170,6 @@ def get_face_embedding(image: np.ndarray) -> np.ndarray:
             detail="No face detected. Please ensure the image contains a clear, well-lit face looking directly at the camera. Last error: " + error_message
         )
 
-def process_image(image_data: bytes) -> np.ndarray:
-    """Process image data with enhanced error checking."""
-    try:
-        logger.info(f"Processing image data of size: {len(image_data)} bytes")
-        nparr = np.frombuffer(image_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img is None:
-            raise ValueError("Failed to decode image data")
-        
-        # Check image properties
-        height, width = img.shape[:2]
-        logger.info(f"Decoded image dimensions: {width}x{height}")
-        
-        # Ensure minimum size
-        if width < MIN_IMAGE_SIZE or height < MIN_IMAGE_SIZE:
-            raise ValueError(f"Image too small: {width}x{height}")
-        
-        # Check if image is empty or corrupted
-        if img.size == 0 or not img.data.contiguous:
-            raise ValueError("Image data is empty or corrupted")
-            
-        logger.info(f"Image processed successfully. Shape: {img.shape}")
-        return img
-        
-    except Exception as e:
-        logger.error(f"Image processing failed: {str(e)}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to process image: {str(e)}"
-        )    
 
 def process_image(image_data: bytes) -> np.ndarray:
     """Process image data into numpy array."""
@@ -226,100 +197,122 @@ async def register_employee(
     employee_id: str = Form(...),
     images: List[UploadFile] = File(...)
 ):
-    """Register a new employee with multiple face images."""
-    logger.info(f"Starting registration for employee_id: {employee_id}")
-    
+    """
+    Register an employee with their face embeddings using ChromaDB.
+    """
     try:
-        # Validate basic inputs
-        if not images:
+        logger.info(f"Starting registration for employee_id: {employee_id}")
+        
+        # Validate input
+        if not name or not employee_id:
             raise HTTPException(
                 status_code=400,
-                detail="No images provided"
+                detail="Name and employee_id are required"
+            )
+        
+        if not images or len(images) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one image is required"
             )
         
         logger.info(f"Received {len(images)} images")
         
-        # Check existing employee
-        existing = face_collection.get(where={"employee_id": employee_id})
-        if existing["ids"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Employee with ID '{employee_id}' already exists"
-            )
-        
-        embeddings = []
-        successful_images = 0
-        failed_images = []
-        
         # Process each image
-        for i, image in enumerate(images):
-            logger.info(f"Processing image {i+1}/{len(images)}: {image.filename}")
+        embeddings = []
+        metadatas = []
+        failed_images = []
+        for idx, image in enumerate(images):
             try:
-                # Validate image file
+                logger.info(f"Processing image {idx + 1}/{len(images)}: {image.filename}")
+                
+                # Validate image
                 await validate_image_file(image)
                 
-                # Read and process image
-                contents = await image.read()
-                img = process_image(contents)
+                # Read image data
+                image_data = await image.read()
+                
+                # Process image
+                img = process_image(image_data)
                 
                 # Extract face embedding
                 embedding = get_face_embedding(img)
-                embeddings.append(embedding.tolist())
-                successful_images += 1
+                embeddings.append(embedding.tolist())  # Convert numpy array to list for ChromaDB
                 
-                logger.info(f"Successfully processed image {i+1}")
-                
-            except HTTPException as he:
-                logger.error(f"Failed to process image {i+1}: {he.detail}")
-                failed_images.append({
-                    "image_index": i,
+                # Add metadata for the embedding
+                metadatas.append({
                     "filename": image.filename,
-                    "error": he.detail
+                    "employee_id": employee_id,
+                    "name": name
                 })
-            finally:
-                await image.seek(0)
+                
+                logger.info(f"Successfully processed image {idx + 1}")
+                
+            except HTTPException as e:
+                logger.error(f"Failed to process image {idx + 1}: {str(e)}")
+                failed_images.append(image.filename)
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error processing image {idx + 1}: {str(e)}")
+                failed_images.append(image.filename)
+                continue
         
-        if not embeddings:
-            logger.error("No valid face images were processed")
+        # Store embeddings in ChromaDB
+                # Store embeddings in ChromaDB
+        if embeddings:
+            try:
+                logger.info("Storing embeddings in ChromaDB")
+                
+                # Print embeddings in the backend console
+                logger.info(f"Embeddings: {embeddings}")
+                
+                if embeddings:
+                    print(f"First embedding: {embeddings[0]}")  # This will print the first embedding
+                else:
+                    print("No embeddings found.")
+                # Ensure face_collection is a valid ChromaDB collection
+                if not hasattr(face_collection, "add"):
+                    raise HTTPException(
+                        status_code=500,
+                        detail="ChromaDB collection is not properly initialized"
+                    )
+                
+                # Add embeddings and metadata to ChromaDB
+                face_collection.add(
+                    embeddings=embeddings,  # List of embeddings
+                    metadatas=metadatas,   # List of metadata dictionaries
+                    ids=[f"{employee_id}_{i}" for i in range(len(embeddings))]  # Unique IDs for each embedding
+                )
+                
+                logger.info(f"Successfully stored embeddings for employee_id: {employee_id}")
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "message": "Registration successful",
+                        "employee_id": employee_id,
+                        "faces_registered": len(embeddings),
+                        "failed_images": failed_images
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to store embeddings in ChromaDB: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to store embeddings in ChromaDB: {str(e)}"
+                )
+        else:
             raise HTTPException(
                 status_code=400,
-                detail="No valid face images were processed. Please check the image requirements and try again."
+                detail="No valid face embeddings were extracted from the provided images"
             )
-        
-        # Store embeddings
-        logger.info(f"Storing {len(embeddings)} embeddings")
-        face_collection.add(
-            embeddings=embeddings,
-            documents=[
-                json.dumps({
-                    "name": name,
-                    "employee_id": employee_id
-                })
-            ] * len(embeddings),
-            ids=[f"{employee_id}_{i}" for i in range(len(embeddings))]
-        )
-        
-        response = {
-            "message": "Employee registered successfully",
-            "employee": {
-                "name": name,   
-                "employee_id": employee_id,
-                "faces_registered": successful_images
-            }
-        }
-        
-        if failed_images:
-            response["failed_images"] = failed_images
-            
-        logger.info(f"Registration completed. Successful: {successful_images}, Failed: {len(failed_images)}")
-        return JSONResponse(content=response)
-        
-    except HTTPException as he:
-        logger.error(f"HTTP Exception: {he.detail}")
+
+    except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error during registration: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"An unexpected error occurred: {str(e)}"
-        )
+            detail=f"Unexpected error during registration: {str(e)}"
+        )      
+        
+        
