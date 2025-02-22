@@ -6,14 +6,10 @@ import time
 import json
 import streamlit as st
 from streamlit.components.v1 import html
-import cv2
-import os
-from pathlib import Path
-from deepface import DeepFace
 import requests
-import numpy as np
-from deepface import DeepFace  # Import DeepFace for embedding generation
+from deepface import DeepFace
 import os
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress all TensorFlow logs
 
 def nav_to(url):
@@ -23,126 +19,6 @@ def nav_to(url):
         </script>
     """
     html(js, height=0)
-
-def register_api_call(name, employee_id, image_paths):
-    """
-    Make API call to register a new employee using multipart form data with improved error handling
-    and image validation using correct DeepFace API
-    """
-    API_ENDPOINT = "http://localhost:8000/api/register"
-    
-    try:
-        # Validate inputs
-        if not name or not employee_id:
-            return {
-                "success": False,
-                "message": "Name and employee ID are required",
-                "status_code": 400
-            }
-            
-        if not image_paths:
-            return {
-                "success": False,
-                "message": "No image paths provided",
-                "status_code": 400
-            }
-        
-        # Prepare files list for multipart upload
-        files = []
-        valid_images = []
-        
-        for i, path in enumerate(image_paths):
-            try:
-                # Read and verify image
-                img = cv2.imread(str(path))
-                if img is None:
-                    print(f"Warning: Could not read image {path}")
-                    continue
-                    
-                # Verify image dimensions
-                height, width = img.shape[:2]
-                if height < 64 or width < 64:
-                    print(f"Warning: Image {path} is too small ({width}x{height})")
-                    continue
-                
-                # Verify face detection using DeepFace.represent
-                try:
-                    # Convert BGR to RGB for DeepFace
-                    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    # Use represent function with enforce_detection=True to ensure face is present
-                    face_result = DeepFace.represent(
-                        rgb_img, 
-                        model_name="Facenet",
-                        enforce_detection=True,
-                        detector_backend="opencv"
-                    )
-                    
-                    if face_result and isinstance(face_result, list) and len(face_result) > 0:
-                        # If face detection succeeds, add to valid images
-                        # Encode as JPEG with quality setting
-                        _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        files.append(
-                            ("images", (f"face_{i}.jpg", buffer.tobytes(), "image/jpeg"))
-                        )
-                        valid_images.append(path)
-                        print(f"Successfully processed image: {path}")
-                    else:
-                        print(f"Warning: No face detected in {path}")
-                        continue
-                    
-                except Exception as e:
-                    print(f"Warning: Face detection failed for {path}: {str(e)}")
-                    continue
-                    
-            except Exception as e:
-                print(f"Error processing file {path}: {e}")
-                continue
-        
-        if not files:
-            return {
-                "success": False,
-                "message": "No valid face images found in the provided images",
-                "status_code": 400
-            }
-        
-        print(f"Sending {len(files)} valid images to API")
-        
-        # Make the API call with multipart form data
-        response = requests.post(
-            API_ENDPOINT,
-            files=files,
-            data={
-                "name": name,
-                "employee_id": employee_id
-            },
-            timeout=30  # Add timeout
-        )
-        
-        print(f"API Response: {response.status_code} - {response.text}")
-        
-        return {
-            "success": response.status_code == 200,
-            "message": response.text,
-            "status_code": response.status_code,
-            "valid_images": valid_images,
-            "total_processed": len(valid_images)
-        }
-        
-    except requests.exceptions.RequestException as e:
-        print(f"API Request Error: {str(e)}")
-        return {
-            "success": False,
-            "message": f"API request failed: {str(e)}",
-            "status_code": None
-        }
-    finally:
-        # Clean up
-        for file_tuple in files:
-            try:
-                if hasattr(file_tuple[1][1], 'close'):
-                    file_tuple[1][1].close()
-            except:
-                pass
             
 def main():
     st.set_page_config(page_title="Employee Clock-In System", page_icon="📅")
@@ -287,23 +163,17 @@ def register_page2():
             face_result = DeepFace.represent(
                 rgb_face,
                 model_name="Facenet",
-                enforce_detection=False,
+                enforce_detection=True,  # Ensures face is detected
                 detector_backend="opencv"
             )
 
-            if face_result and isinstance(face_result, list) and len(face_result) > 0:
-                embedding = face_result[0]["embedding"]
-                print(f"Face Embedding: {embedding[:5]}... (truncated)")  # Print first 5 values for brevity
-
-                
-                return face_img
+            if isinstance(face_result, list) and len(face_result) > 0:
+                return face_img  # Return the valid face image
             return None
-            
+
         except Exception as e:
-            debug_container.text(f"Face processing error: {str(e)}")
+            st.warning(f"Face processing error: {str(e)}")
             return None
-
-
 
     def send_batch_to_api(files):
         try:
@@ -336,10 +206,18 @@ def register_page2():
                     failed = len(response_json.get('failed_images', []))
                     
                     status_text.success(f"Successfully registered {faces_registered} faces. Failed: {failed}")
+                    
+                    # Store the response status code in session state
+                    st.session_state.registration_response = 200
+                    
                     return True
                 else:
                     error_detail = response_json.get('detail', 'Unknown error')
                     status_text.error(f"Registration failed: {error_detail}")
+                    
+                    # Store the response status code in session state
+                    st.session_state.registration_response = response.status_code
+                    
                     return False
                     
             except json.JSONDecodeError:
@@ -439,9 +317,6 @@ def register_page2():
         st.session_state.processed_images = []
 
 
-
-
-
 def registered_page():
     # Check if we have the required session state
     if 'name' not in st.session_state or 'employee_id' not in st.session_state:
@@ -454,30 +329,18 @@ def registered_page():
     
     st.header("Registration Complete!")
     
-    dataset_path = Path("datasets") / st.session_state.name
-    if dataset_path.exists():
-        image_paths = list(dataset_path.glob("*.jpg"))
-        with st.spinner("Syncing with server..."):
-            api_response = register_api_call(
-                st.session_state.name, 
-                st.session_state.employee_id, 
-                image_paths
-            )
-            
-            if api_response["success"]:
-                st.success(f"Employee {st.session_state.name} registered successfully!")
-                st.write(f"Registered {len(api_response.get('valid_images', []))} face images")
-            else:
-                st.error("Server registration failed")
-                st.write(api_response["message"])
-                st.write("Please contact support with the following details:")
-                st.code(api_response)
+    # Check if the registration was successful (response code 200)
+    if hasattr(st.session_state, 'registration_response') and st.session_state.registration_response == 200:
+        st.success(f"Employee {st.session_state.name} registered successfully!")
+        st.write(f"Registered {len(st.session_state.processed_images)} face images")
     else:
-        st.error(f"No images found for {st.session_state.name}")
+        st.error("Server registration failed")
+        st.write("Please contact support with the following details:")
+        st.code(st.session_state.registration_response if hasattr(st.session_state, 'registration_response') else "No response data available")
     
     if st.button("Return to Home"):
         # Clear session state
-        for key in ['name', 'employee_id', 'captured_images', 'current_position', 'last_capture_time']:
+        for key in ['name', 'employee_id', 'captured_images', 'current_position', 'last_capture_time', 'registration_response']:
             if key in st.session_state:
                 del st.session_state[key]
         

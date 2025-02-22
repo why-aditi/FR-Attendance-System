@@ -37,3 +37,5 @@ else:
 
 # Print confirmation
 print(f"Collection '{collection_name}' is ready!")
+data = face_collection.get()
+print(data)

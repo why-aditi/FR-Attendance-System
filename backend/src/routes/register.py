@@ -268,6 +268,7 @@ async def register_employee(
                 
                 if embeddings:
                     print(f"First embedding: {embeddings[0]}")  # This will print the first embedding
+                    l = len(embeddings)
                 else:
                     print("No embeddings found.")
                 # Ensure face_collection is a valid ChromaDB collection
@@ -290,7 +291,7 @@ async def register_employee(
                     content={
                         "message": "Registration successful",
                         "employee_id": employee_id,
-                        "faces_registered": len(embeddings),
+                        "faces_registered": l,
                         "failed_images": failed_images
                     }
                 )
